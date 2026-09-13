@@ -23,6 +23,7 @@ echo "[1/3] Creating .app bundle..."
 rm -rf "${APP_DIR}"
 mkdir -p "${APP_DIR}/Contents/MacOS"
 mkdir -p "${APP_DIR}/Contents/Resources"
+cp Assets/AppIcon.icns "${APP_DIR}/Contents/Resources/AppIcon.icns"
 
 # Copy ALL files from publish directory
 cp -R "${BUILD_DIR}"/* "${APP_DIR}/Contents/MacOS/"
@@ -59,7 +60,9 @@ cat > "${APP_DIR}/Contents/Info.plist" << 'PLIST'
     <key>NSBluetoothPeripheralUsageDescription</key>
     <string>OPPO Pods Manager needs Bluetooth to connect to your earbuds.</string>
     <key>CFBundleIconFile</key>
-    <string>tuopan</string>
+    <string>AppIcon</string>
+    <key>CFBundleIconName</key>
+    <string>AppIcon</string>
 </dict>
 </plist>
 PLIST
