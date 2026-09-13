@@ -29,6 +29,7 @@
 #import <signal.h>
 #import <errno.h>
 #import <fcntl.h>
+#import <UserNotifications/UserNotifications.h>
 
 // ---------------- 桥接公共部分 ----------------
 
@@ -364,6 +365,43 @@ static void OnSigTerm(int sig)
     _exit(0);
 }
 
+// ---------------- 系统通知（macOS Notification Center） ----------------
+
+// 用 NSAppleEventDescriptor 安全转义 AppleScript 字符串字面量（osascript 兜底路径用）
+static NSString *QuoteAppleScript(NSString *s)
+{
+    NSMutableString *q = [NSMutableString stringWithString:@"\""];
+    for (NSUInteger i = 0; i < s.length; i++) {
+        unichar c = [s characterAtIndex:i];
+        if (c == '"' || c == '\\') [q appendFormat:@"\\%@", [NSString stringWithCharacters:&c length:1]];
+        else [q appendFormat:@"%C", c];
+    }
+    [q appendString:@"\""];
+    return q;
+}
+
+// 用法：OppodsRfcommHelper notify <title> <subtitle|-> <body>
+// 经 osascript display notification 投递到系统通知中心（横幅位置/声音/免打扰均由系统管理）。
+// 注：曾尝试 UNUserNotificationCenter——ad-hoc 签名（无 Team ID）的 App 在 macOS 27 上
+// 会被静默拒绝（NotificationsNotAllowed，设置里也不出现条目），故直接走 osascript；
+// 通知在通知中心归属「脚本编辑器」，仅来源显示不同。
+static int RunNotify(NSArray<NSString *> *args)
+{
+    if (args.count < 3) { fprintf(stderr, "usage: notify <title> <subtitle|-> <body>\n"); return 1; }
+    NSString *title = args[0], *subtitle = args[1], *body = args[2];
+
+    NSMutableString *script = [NSMutableString string];
+    [script appendFormat:@"display notification %@ with title %@", QuoteAppleScript(body.length > 0 ? body : @" "), QuoteAppleScript(title)];
+    if (![subtitle isEqualToString:@"-"])
+        [script appendFormat:@" subtitle %@", QuoteAppleScript(subtitle)];
+
+    NSTask *t = [NSTask launchedTaskWithLaunchPath:@"/usr/bin/osascript"
+                                        arguments:@[@"-e", script]];
+    [t waitUntilExit];
+    Log_(@"notify via osascript exit=%d", t.terminationStatus);
+    return t.terminationStatus == 0 ? 0 : 3;
+}
+
 static ssize_t ReadFull(int fd, uint8_t *buf, size_t n)
 {
     size_t got = 0;
@@ -426,7 +464,16 @@ static void HandleCmd(void)
 int main(int argc, char **argv)
 {
     @autoreleasepool {
-        if (argc < 2) { fprintf(stderr, "usage: %s <MAC>\n", argv[0]); return 1; }
+        if (argc < 2) { fprintf(stderr, "usage: %s <MAC>|notify <title> <subtitle|-> <body>\n", argv[0]); return 1; }
+
+        // 一次性模式：发系统通知后立即退出（不进 RFCOMM/GATT 流程）
+        if (strcmp(argv[1], "notify") == 0)
+        {
+            NSMutableArray<NSString *> *nargs = [NSMutableArray array];
+            for (int i = 2; i < argc; i++) [nargs addObject:@(argv[i])];
+            return RunNotify(nargs);
+        }
+
         gOut = stdout;
         gOutLock = [NSLock new];
         NSString *mac = @(argv[1]);

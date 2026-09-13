@@ -49,24 +49,36 @@ internal static class ToastManager
         for (int i = 0; i < _active.Count; i++)
         {
             var toast = _active[i];
-            var screen = toast.Screens?.Primary;
+            var screen = toast.Screens?.ScreenFromWindow(toast) ?? toast.Screens?.Primary;
             if (screen == null) continue;
 
             double scale = toast.RenderScaling <= 0 ? 1.0 : toast.RenderScaling;
-            var wa = screen.WorkingArea;  // 物理像素
+            var wa = screen.WorkingArea;
 
-            double wPx = toast.Bounds.Width * scale;
-            double hPx = toast.Bounds.Height * scale;
-            if (wPx <= 1 || hPx <= 1) continue;
+            double wDip = toast.Bounds.Width;
+            double hDip = toast.Bounds.Height;
+            if (wDip <= 1 || hDip <= 1) continue;
 
             // 累计本条下方所有 Toast 的高度（含间隔），得到本条底边上移量
-            double stackedBelowPx = 0;
+            double stackedBelowDip = 0;
             for (int j = i + 1; j < _active.Count; j++)
-                stackedBelowPx += _active[j].Bounds.Height * scale + Gap * scale;
+                stackedBelowDip += _active[j].Bounds.Height + Gap;
 
-            double x = wa.Right - wPx - MarginRight * scale;
-            double y = wa.Bottom - hPx - MarginBottom * scale - stackedBelowPx;
-            toast.Position = new PixelPoint((int)Math.Round(x), (int)Math.Round(y));
+            // Windows: WorkingArea 为物理像素，Window.Position(PixelPoint) 亦为物理像素，直接使用。
+            // macOS: WorkingArea 为 DIP（点），PixelPoint 为物理像素——必须按 RenderScaling 换算，
+            // 否则 Retina 屏上 Toast 落在屏幕中部偏右（坐标恰好缩小一半）。
+            if (OperatingSystem.IsMacOS())
+            {
+                double x = wa.Right - wDip - MarginRight;
+                double y = wa.Bottom - hDip - MarginBottom - stackedBelowDip;
+                toast.Position = new PixelPoint((int)Math.Round(x * scale), (int)Math.Round(y * scale));
+            }
+            else
+            {
+                double x = wa.Right - wDip * scale - MarginRight * scale;
+                double y = wa.Bottom - hDip * scale - MarginBottom * scale - stackedBelowDip * scale;
+                toast.Position = new PixelPoint((int)Math.Round(x), (int)Math.Round(y));
+            }
         }
     }
 }

@@ -13,7 +13,7 @@ echo "[0/3] Building OppodsRfcommHelper..."
 CLANG="${CC:-$(xcrun --find clang)}"
 SDKROOT="${SDKROOT:-$(xcrun --show-sdk-path)}"
 "$CLANG" -fobjc-arc -isysroot "$SDKROOT" \
-  -framework Foundation -framework IOBluetooth -lc++ -O2 \
+  -framework Foundation -framework IOBluetooth -framework UserNotifications -lc++ -O2 \
   -sectcreate __TEXT __info_plist Transport/macOS/RfcommHelper/Info.plist \
   -o "${BUILD_DIR}/OppodsRfcommHelper" \
   Transport/macOS/RfcommHelper/main.mm
@@ -65,7 +65,7 @@ cat > "${APP_DIR}/Contents/Info.plist" << 'PLIST'
 PLIST
 
 # Ad-hoc sign
-echo "[3/3] Ad-hoc signing..."
-codesign --force --deep --sign - "${APP_DIR}"
+echo "[3/3] Signing (identity: ${CODESIGN_ID:--})..."
+codesign --force --deep --sign "${CODESIGN_ID:--}" "${APP_DIR}"
 
 echo "Build complete: ${APP_DIR}"

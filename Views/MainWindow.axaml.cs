@@ -512,7 +512,11 @@ public partial class MainWindow : SukiWindow
                 {
                     _lowBatteryAlerted = true;
                 }
+#if MACOS
+                MacNativeNotify.Show("已连接", GetDeviceDisplayName(), MacNativeNotify.BatterySummary(s));
+#else
                 _ = ToastWindow.ShowAsync(s, GetDeviceDisplayName(), initialToastType, GetToastDuration());
+#endif
 
                 _pods.SendQueryEqAll();  // 首次连接时查询设备端 EQ 列表
             }
@@ -537,7 +541,11 @@ public partial class MainWindow : SukiWindow
             // TrayIcon.SetIcon(this, _iconDisconnected); // 托盘图标切换在 SetupTrayIcon 中处理
 
             if (wasConnected)
+#if MACOS
+                MacNativeNotify.Show("已断开连接", GetDeviceDisplayName(), "");
+#else
                 _ = ToastWindow.ShowAsync(null, GetDeviceDisplayName(), ToastType.Disconnected, GetToastDuration());
+#endif
 
             ResetUi();
             RebuildTrayMenu();
@@ -566,12 +574,20 @@ public partial class MainWindow : SukiWindow
         {
             _criticalBatteryAlerted = true;
             _lowBatteryAlerted = true; // 极低电量跳过低电量弹窗
+#if MACOS
+            MacNativeNotify.Show("耳机电量极低", GetDeviceDisplayName(), MacNativeNotify.BatterySummary(s));
+#else
             _ = ToastWindow.ShowAsync(s, GetDeviceDisplayName(), ToastType.CriticalBattery, GetToastDuration());
+#endif
         }
         else if (!_lowBatteryAlerted && batteryToastType == ToastType.LowBattery)
         {
             _lowBatteryAlerted = true;
+#if MACOS
+            MacNativeNotify.Show("耳机电量低", GetDeviceDisplayName(), MacNativeNotify.BatterySummary(s));
+#else
             _ = ToastWindow.ShowAsync(s, GetDeviceDisplayName(), ToastType.LowBattery, GetToastDuration());
+#endif
         }
 
         var parts = new List<string>();
