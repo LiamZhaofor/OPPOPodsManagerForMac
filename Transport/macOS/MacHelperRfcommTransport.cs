@@ -26,6 +26,10 @@ public sealed class MacHelperRfcommTransport : IPodTransport
     private readonly object _sendLock = new();
 
     private Process? _proc;
+    private System.Net.Sockets.TcpClient? _tcp;
+    private System.Net.Sockets.NetworkStream? _cmd;
+    private volatile int _cmdPort;
+    private readonly SemaphoreSlim _portSignal = new(0, 1);
     private Thread? _readThread;
     private volatile bool _disposed;
     private readonly SemaphoreSlim _statusSignal = new(0, 1);
@@ -49,6 +53,7 @@ public sealed class MacHelperRfcommTransport : IPodTransport
         {
             Log.D("HELPRFC", "Connect: start");
             IsConnected = false; LastError = null; _disposed = false;
+            while (_portSignal.Wait(0)) { } // 清掉上一轮残留的端口信号
 
             var (addr, name) = _locator.Locate();
             if (addr == 0) { LastError = "No paired OPPO device found"; return false; }
@@ -57,6 +62,14 @@ public sealed class MacHelperRfcommTransport : IPodTransport
             _proc = SpawnHelper(AddrToString(addr));
             if (_proc == null) { LastError = "RfcommHelper 未找到（编译产物缺失）"; return false; }
             StartReadLoop();
+
+            // helper 把命令通道端口打到 stderr（PORT=xxx），等它监好后连过去
+            // （新二进制首次启动可能被 Gatekeeper 扫描拖慢数秒）
+            if (!_portSignal.Wait(20_000)) { LastError = "RfcommHelper 未报告命令端口"; Cleanup(); return false; }
+            _tcp = new System.Net.Sockets.TcpClient();
+            _tcp.Connect(System.Net.IPAddress.Loopback, _cmdPort);
+            _cmd = _tcp.GetStream();
+            Log.D("HELPRFC", $"cmd channel connected port={_cmdPort}");
 
             // 探测：逐候选链路打开 → 发电量查询 → 收到合法响应帧才算命中 melody 控制通道
             var deadline = DateTime.UtcNow.AddMilliseconds(ConnectWaitMs);
@@ -113,7 +126,18 @@ public sealed class MacHelperRfcommTransport : IPodTransport
             CreateNoWindow = true,
         };
         var p = Process.Start(psi);
-        p.ErrorDataReceived += (_, e) => { if (e.Data != null) Log.D("HELPER", e.Data); };
+        p.ErrorDataReceived += (_, e) =>
+        {
+            if (e.Data == null) return;
+            Log.D("HELPER", e.Data);
+            // helper 的日志行带 "[helper] " 前缀，用 Contains 而非 StartsWith
+            int idx = e.Data.IndexOf("PORT=", StringComparison.Ordinal);
+            if (idx >= 0 && int.TryParse(e.Data.Substring(idx + 5), out var port))
+            {
+                _cmdPort = port;
+                _portSignal.Release();
+            }
+        };
         p.BeginErrorReadLine();
         return p;
     }
@@ -210,17 +234,23 @@ public sealed class MacHelperRfcommTransport : IPodTransport
 
     private void WritePipe(byte[] bytes)
     {
-        var stdin = _proc!.StandardInput.BaseStream;
-        var hdr = new[] { (byte)(bytes.Length & 0xFF), (byte)((bytes.Length >> 8) & 0xFF),
-                          (byte)((bytes.Length >> 16) & 0xFF), (byte)((bytes.Length >> 24) & 0xFF) };
-        stdin.Write(hdr, 0, 4);
-        stdin.Write(bytes, 0, bytes.Length);
-        stdin.Flush();
+        // 命令帧：4 字节小端长度 + payload（与 helper 的 HandleCmd 约定一致）
+        var buf = new byte[bytes.Length + 4];
+        buf[0] = (byte)(bytes.Length & 0xFF);
+        buf[1] = (byte)((bytes.Length >> 8) & 0xFF);
+        buf[2] = (byte)((bytes.Length >> 16) & 0xFF);
+        buf[3] = (byte)((bytes.Length >> 24) & 0xFF);
+        Buffer.BlockCopy(bytes, 0, buf, 4, bytes.Length);
+        var s = _cmd!;
+        s.Write(buf, 0, buf.Length);
+        s.Flush();
+        Log.D("HELPRFC", $"wrote {buf.Length}B to cmd socket");
     }
 
     public void Send(ushort cmd, byte[] payload)
     {
-        if (!IsConnected || _proc == null) return;
+        Log.D("HELPRFC", $"Send 0x{cmd:X4} ({payload?.Length ?? 0}B) conn={IsConnected} cmd={( _cmd != null ? "ok" : "null")}");
+        if (!IsConnected || _cmd == null) return;
         byte[] bytes;
         lock (_sendLock) { bytes = _codec.Encode(cmd, payload); }
         // 管道协议：payload[0]=0x01(数据)，其余为写入通道的原始字节
@@ -253,6 +283,9 @@ public sealed class MacHelperRfcommTransport : IPodTransport
     {
         var p = _proc;
         _proc = null;
+        try { _cmd?.Dispose(); } catch { }
+        try { _tcp?.Dispose(); } catch { }
+        _cmd = null; _tcp = null;
         if (p == null) return;
         try { p.Kill(entireProcessTree: true); } catch { }
         try { p.Dispose(); } catch { }

@@ -113,7 +113,9 @@ public partial class PodManager : IPodManager
         if (Caps.HasCustomEq)
             _deviceCaps.Add(OppoProtocol.CmdSetEqDetail);
         // 空间音频三模式：设置命令 0x0422 + 状态回读查询 0x012A（getHeadsetSpatialType）
-        if (Caps.HasSpatialAudio)
+        // 两态机型（spatialTypes 不足 3 项，如 Free4）也要注册并查询 0x012A：
+        // 其 feature 0x1B 批量开关不反映真实空间音频状态，显示以 0x812A 回读为准
+        if (Caps.HasSpatialAudio || Caps.HasSpatialSound)
         {
             _deviceCaps.Add(OppoProtocol.CmdSpatialAudio);
             _deviceCaps.Add(OppoProtocol.CmdQueryHeadsetSpatial);
@@ -216,6 +218,9 @@ public partial class PodManager : IPodManager
                 if (type >= 0)
                 {
                     State.SpatialMode = OppoProtocol.SpatialTypeToName(type);
+                    // 两态机型（如 Free4，spatialTypes=[0,1]）的 0x1B 批量开关不反映真实
+                    // 空间音频状态，开关显示以 0x812A 回读的 type!=0 为准
+                    State.SpatialSound = type != 0;
                     Log.D("RFCOMM", $"空间音频三模式={State.SpatialMode}(type={type})");
                     StateChanged?.Invoke();
                 }
@@ -272,7 +277,7 @@ public partial class PodManager : IPodManager
                         }
                     }
                     else
-                        Log.D("RFCOMM", $"DispatchFrame: 设置失败 cmd=0x{frame.Cmd:X4} status={status}");
+                        Log.D("RFCOMM", $"DispatchFrame: 设置失败 cmd=0x{frame.Cmd:X4} status={status} payload={BitConverter.ToString(p, 0, Math.Min(len, 16))}");
                     break;
                 }
                 // RequestCommandManager 状态事件族 0x0500-0x05FF（耳机主动上报：下载/执行/播放
@@ -330,9 +335,9 @@ public partial class PodManager : IPodManager
             Thread.Sleep(80);
             TrySend(OppoProtocol.CmdQueryGameSound, OppoProtocol.PayEmpty);  // 游戏音效当前状态
             Thread.Sleep(80);
-            // 空间音频三模式当前值：仅三模式（headsetSpatialType）机型才有 0x012A，
-            // 两模式开关型机型走 feature 0x1B（批量查询）已覆盖，不发以免无谓拦截日志。
-            if (Caps.HasSpatialAudio)
+            // 空间音频三模式当前值：三模式（headsetSpatialType）机型发 0x012A；
+            // 两态开关型机型（如 Free4）其 0x1B 批量开关不可靠，同样发 0x012A 以真实回读为准
+            if (Caps.HasSpatialAudio || Caps.HasSpatialSound)
             {
                 TrySend(OppoProtocol.CmdQueryHeadsetSpatial, OppoProtocol.PayEmpty);
                 Thread.Sleep(80);
@@ -426,7 +431,10 @@ public partial class PodManager : IPodManager
     public void SendSpatial(bool on)
     {
         Log.D("RFCOMM", $"SendSpatial on={on}");
-        SendFeatureSwitch(OppoProtocol.FeatureSpatial, on, "空间音效");
+        // 两态机型（Free4）：若 0x1B 开关被拒（status=2），回退 0x0422 空间音频类型（on=Fixed / off=Off）
+        SendWithFallback(OppoProtocol.CmdSetFeature, OppoProtocol.FeaturePayload(OppoProtocol.FeatureSpatial, on),
+                         OppoProtocol.CmdSpatialAudio, on ? OppoProtocol.SpatialFixed : OppoProtocol.SpatialOff,
+                         "空间音效");
     }
 
     public void SendSpatialAudio(string mode)
@@ -451,11 +459,37 @@ public partial class PodManager : IPodManager
     public void SendGameMode(bool on, bool compatible = false)
     {
         Log.D("RFCOMM", $"SendGameMode on={on} compatible={compatible}");
-        SendFeatureSwitch(OppoProtocol.FeatureGameMain, on, "游戏模式");
+        // 通用机型 feature 0x28；Free4 等新机型 0x28 会被拒(ACK status=2)，
+        // 批量状态里只回报 0x06(游戏低延迟)——设备拒绝时自动回退到 0x06。
+        SendFeatureSwitchWithFallback(OppoProtocol.FeatureGameMain, OppoProtocol.FeatureGameLL, on, "游戏模式");
         // 兼容实现：部分设备游戏低延迟需额外发 feature 0x06
         if (compatible)
             SendFeatureSwitch(OppoProtocol.FeatureGameLL, on, "游戏低延迟");
     }
+
+    /// <summary>
+    /// 发命令，设备明确拒绝（ACK status 非成功/超时/本地失败，如 Free4 对 0x28 回 2）时
+    /// 自动改发 fallback 命令。超时/断链不回退（重试与失败提示交给通用路径语义）。
+    /// </summary>
+    private void SendWithFallback(ushort cmd, byte[] payload, ushort fallbackCmd, byte[] fallbackPayload, string label)
+    {
+        if (!Supports(cmd)) return;
+        _dispatcher.SendTracked(cmd, payload, (status, _) =>
+        {
+            if (status == CmdStatus.Success) return;
+            if (status == CmdStatus.Timeout || status == CmdStatus.Failed)
+            {
+                CommandFailed?.Invoke($"{label} 失败" + (status == CmdStatus.Timeout ? "（超时）" : ""));
+                return;
+            }
+            Log.D("RFCOMM", $"{label}: cmd 0x{cmd:X4} 被设备拒绝(status={(int)status}), 回退 cmd 0x{fallbackCmd:X4}");
+            SendSet(fallbackCmd, fallbackPayload, label);
+        });
+    }
+
+    private void SendFeatureSwitchWithFallback(byte primary, byte fallback, bool on, string label)
+        => SendWithFallback(OppoProtocol.CmdSetFeature, OppoProtocol.FeaturePayload(primary, on),
+                            OppoProtocol.CmdSetFeature, OppoProtocol.FeaturePayload(fallback, on), label);
 
     /// <summary>
     /// 游戏音效开关（命令 0x423 + [type][enable]）。
@@ -668,10 +702,13 @@ public partial class PodManager : IPodManager
                             _transport.Poll(400);
                         }
 
-                        if (Caps.HasSpatialAudio && TrySend(OppoProtocol.CmdQueryHeadsetSpatial, OppoProtocol.PayEmpty))
+                        if (Caps.HasSpatialAudio || Caps.HasSpatialSound)
                         {
-                            Thread.Sleep(100);
-                            _transport.Poll(400);
+                            if (TrySend(OppoProtocol.CmdQueryHeadsetSpatial, OppoProtocol.PayEmpty))
+                            {
+                                Thread.Sleep(100);
+                                _transport.Poll(400);
+                            }
                         }
 
                         _transport.Send(OppoProtocol.CmdRegisterNotify, OppoProtocol.PayRegisterNotify);

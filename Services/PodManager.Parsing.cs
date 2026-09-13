@@ -356,6 +356,8 @@ public partial class PodManager
 
     private void ParseBatchStatus(byte[] pkt, int start, int len)
     {
+        // DEBUG: 原始 [feature][value] 对，定位 Free4 游戏模式/空间音频状态
+        Log.D("RFCOMM", $"ParseBatchStatus raw[{len}]: {BitConverter.ToString(pkt, start, Math.Min(len, 48))}");
         for (int i = 0; i + 1 < len; i += 2)
         {
             byte feature = pkt[start + i];

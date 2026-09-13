@@ -3247,7 +3247,11 @@ public partial class MainWindow : SukiWindow
             return;
         _trayMenuSignature = signature;
 
-        var menu = new NativeMenu();
+        // macOS 27 上整体替换 TrayIcon.Menu 会抛
+        // "The menu being updated does not match"（Avalonia NativeMenu bug），
+        // 改为复用同一个 NativeMenu 实例、只增删条目
+        var menu = _trayIcon.Menu ?? new NativeMenu();
+        menu.Items.Clear();
         _trayAncMap.Clear();
 
         if (s.Connected)
@@ -3310,7 +3314,8 @@ public partial class MainWindow : SukiWindow
         var quitItem = new NativeMenuItem("退出");
         quitItem.Click += (_, _) => QuitApplication();
         menu.Add(quitItem);
-        _trayIcon.Menu = menu;
+        if (_trayIcon.Menu == null)
+            _trayIcon.Menu = menu; // 仅首次赋值；后续只变更 Items，避免 macOS NativeMenu 替换异常
     }
 
     private string BuildTrayMenuSignature(PodState s, DeviceCapabilities caps)

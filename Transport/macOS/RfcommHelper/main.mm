@@ -26,6 +26,9 @@
 #import <stdlib.h>
 #import <string.h>
 #import <unistd.h>
+#import <signal.h>
+#import <errno.h>
+#import <fcntl.h>
 
 // ---------------- 桥接公共部分 ----------------
 
@@ -212,17 +215,18 @@ static BOOL TryGatt(NSString *mac)
     }
     if (gCentral.state != CBManagerStatePoweredOn) { Log_(@"CB not powered"); return NO; }
 
-    // 先按 melody 服务过滤扫描；扫不到再全量扫描按名字匹配
+    // 先按 melody 服务过滤扫描；扫不到再全量扫描按品牌名匹配
+    // （Free4 双设备槽位占满时不广播，GATT 通常 8 秒内落空，预算不宜过长）
     CBUUID *melody = MelodyUuid();
     [gCentral scanForPeripheralsWithServices:@[melody] options:@{CBCentralManagerScanOptionAllowDuplicatesKey: @NO}];
-    dl = [NSDate dateWithTimeIntervalSinceNow:8.0];
+    dl = [NSDate dateWithTimeIntervalSinceNow:5.0];
     while (gGatt.peripheral == nil && [dl compare:[NSDate date]] == NSOrderedDescending) {
         [[NSRunLoop mainRunLoop] runMode:NSDefaultRunLoopMode beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.1]];
     }
     if (gGatt.peripheral == nil) {
         Log_(@"no adv with melody svc, fallback brand-name scan");
         [gCentral scanForPeripheralsWithServices:nil options:@{CBCentralManagerScanOptionAllowDuplicatesKey: @YES}];
-        dl = [NSDate dateWithTimeIntervalSinceNow:6.0];
+        dl = [NSDate dateWithTimeIntervalSinceNow:3.0];
         while (gGatt.peripheral == nil && [dl compare:[NSDate date]] == NSOrderedDescending) {
             [[NSRunLoop mainRunLoop] runMode:NSDefaultRunLoopMode beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.2]];
         }
@@ -266,6 +270,7 @@ static IOBluetoothRFCOMMChannel *gOpenChannel = nil;
 }
 - (void)rfcommChannelWriteComplete:(IOBluetoothRFCOMMChannel *)ch refcon:(void *)refcon status:(IOReturn)status
 {
+    Log_(@"writeComplete status=0x%x", status);
 }
 - (void)rfcommChannelControlSignalsChanged:(IOBluetoothRFCOMMChannel *)ch
 {
@@ -339,23 +344,70 @@ static BOOL TryOpen(IOBluetoothDevice *dev, BluetoothRFCOMMChannelID chID, ChanD
 
 // ---------------- stdin 命令处理 ----------------
 
-static void HandleStdin(void)
+// stdin 曾用管道，但在 macOS 27 + .NET 10 组合下出现"App 写入永远不到达"的怪症
+// （内核管道配对正确、cat 独立验证正常）。命令通道改走 127.0.0.1 TCP 环回：
+// helper 监听随机端口，把 PORT=xxx 打到 stderr，由 C# 解析后连接。
+// 协议：4 字节小端长度 + payload，payload[0] 为 opcode：
+//   0x01 + 数据  写入当前链路；0x02 放弃当前链路换下一个候选
+#import <sys/socket.h>
+#import <arpa/inet.h>
+#import <netinet/in.h>
+
+static int gCmdFd = -1;
+static int gListenFd = -1;
+static int gListenPort = 0;
+
+static void OnSigTerm(int sig)
 {
+    (void)sig;
+    // 进程退出即关 fd，blued 释放 RFCOMM 会话，避免占死耳机唯一的 SPP 服务
+    _exit(0);
+}
+
+static ssize_t ReadFull(int fd, uint8_t *buf, size_t n)
+{
+    size_t got = 0;
+    while (got < n) {
+        ssize_t r = read(fd, buf + got, n - got);
+        if (r <= 0) return -1;
+        got += (size_t)r;
+    }
+    return (ssize_t)got;
+}
+
+static void HandleCmd(void)
+{
+    // 诊断：确认 fd 身份与标志位
+    {
+        struct sockaddr_in peer;
+        socklen_t pl = sizeof(peer);
+        if (getpeername(gCmdFd, (struct sockaddr *)&peer, &pl) == 0)
+            Log_(@"cmd fd=%d peer=%s:%d flags=0x%x", gCmdFd, inet_ntoa(peer.sin_addr), ntohs(peer.sin_port),
+                 fcntl(gCmdFd, F_GETFL));
+        else
+            Log_(@"cmd fd=%d getpeername failed errno=%d", gCmdFd, errno);
+    }
     uint8_t hdr[4];
-    if (ReadExact(0, hdr, 4) < 0) { Log_(@"stdin EOF"); exit(0); }
+    ssize_t got = ReadFull(gCmdFd, hdr, 4);
+    Log_(@"ReadFull hdr got=%zd [%02x %02x %02x %02x]", got, hdr[0], hdr[1], hdr[2], hdr[3]);
+    if (got < 0) { Log_(@"cmd EOF"); exit(0); }
     uint32_t len = hdr[0] | (hdr[1] << 8) | (hdr[2] << 16) | ((uint32_t)hdr[3] << 24);
-    if (len == 0 || len > 8192) { Log_(@"bad frame len %u", len); exit(1); }
+    if (len == 0 || len > 8192) { Log_(@"bad cmd len %u", len); return; }
     uint8_t *buf = (uint8_t *)malloc(len);
     if (!buf) exit(1);
-    if (ReadExact(0, buf, len) < 0) { free(buf); exit(0); }
+    if (ReadFull(gCmdFd, buf, len) < 0) { free(buf); Log_(@"cmd EOF2"); exit(0); }
 
     if (buf[0] == 0x01) {
-        if (gLinkAlive && gMode == 1 && gChannel) {
+        // RFCOMM 分支用 gChannelAlive（TryOpen/FinalizeOpen 维护）；
+        // GATT 分支用 gLinkAlive（didUpdateNotificationState 维护）
+        if (gChannelAlive && gMode == 1 && gChannel) {
+            Log_(@"cmd data len=%u isOpen=%d", len - 1, (int)gChannel.isOpen);
             uint32_t off = 1;
             while (off < len && gChannelAlive) {
                 uint32_t chunk = len - off;
                 if (chunk > 512) chunk = 512;
-                IOReturn r = [gChannel writeSync:buf + off length:(BluetoothRFCOMMMTU)chunk];
+                IOReturn r = [gChannel writeSync:(void *)(buf + off) length:(BluetoothRFCOMMMTU)chunk];
+                Log_(@"writeSync len=%u ret=0x%x", chunk, r);
                 if (r != kIOReturnSuccess) Log_(@"writeSync err 0x%x", r);
                 off += chunk;
             }
@@ -369,7 +421,6 @@ static void HandleStdin(void)
     } else if (buf[0] == 0x02) {
         gNextRequested = YES;
     }
-    free(buf);
 }
 
 int main(int argc, char **argv)
@@ -380,11 +431,47 @@ int main(int argc, char **argv)
         gOutLock = [NSLock new];
         NSString *mac = @(argv[1]);
 
+        // 孤儿保护：父进程（App）退出后立即自杀，防止泄漏持有 RFCOMM 会话
+        // 阻塞耳机唯一的 SPP 服务通道
+        [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(NSTimer *) {
+            if (getppid() == 1) {
+                Log_(@"orphaned, exiting");
+                if (gChannelAlive && gChannel) [gChannel closeChannel];
+                exit(0);
+            }
+        }];
+        signal(SIGTERM, OnSigTerm);
+
+        // 命令通道：127.0.0.1 TCP，端口在 main 里同步创建并立刻打到 stderr
+        // （曾出现 GCD 分派/进程冷启动延迟 10s+ 导致 C# 端口等待超时）
+        {
+            int lfd = socket(AF_INET, SOCK_STREAM, 0);
+            if (lfd < 0) { Log_(@"socket failed"); return 1; }
+            struct sockaddr_in a;
+            memset(&a, 0, sizeof(a));
+            a.sin_family = AF_INET;
+            a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+            a.sin_port = 0;
+            if (bind(lfd, (struct sockaddr *)&a, sizeof(a)) < 0) { Log_(@"bind failed"); return 1; }
+            if (listen(lfd, 1) < 0) { Log_(@"listen failed"); return 1; }
+            socklen_t sl = sizeof(a);
+            getsockname(lfd, (struct sockaddr *)&a, &sl);
+            int port = ntohs(a.sin_port);
+            Log_(@"PORT=%d", port);
+            gListenFd = lfd;
+            gListenPort = port;
+        }
+
+        // accept 放后台线程（阻塞等待 C# 连接），随后处理命令
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            gCmdFd = accept(gListenFd, NULL, NULL);
+            if (gCmdFd < 0) { Log_(@"accept failed"); return; }
+            Log_(@"cmd channel connected");
+            while (true) HandleCmd();
+        });
+
         // ---- Phase 1: GATT（macOS 26/27 上 RFCOMM API 已坏，优先走 BLE melody 服务）----
         if (TryGatt(mac)) {
-            dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-                while (true) HandleStdin();
-            });
             NSDate *tick = [NSDate dateWithTimeIntervalSinceNow:0.2];
             while (true) {
                 [[NSRunLoop mainRunLoop] runMode:NSDefaultRunLoopMode beforeDate:tick];
@@ -455,10 +542,6 @@ int main(int argc, char **argv)
             Log_(@"no RFCOMM channel available");
             return 2;
         }
-
-        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-            while (true) HandleStdin();
-        });
 
         NSDate *tick = [NSDate dateWithTimeIntervalSinceNow:0.2];
         while (true) {
