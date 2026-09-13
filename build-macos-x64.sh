@@ -7,6 +7,17 @@ APP_DIR="${BUILD_DIR}/${APP_NAME}.app"
 
 echo "=== Building ${APP_NAME} for macOS x64 ==="
 
+# 编译 IOBluetooth RFCOMM 助手（供 MacHelperRfcommTransport 拉起），需先完成
+# dotnet publish -c Release -r osx-x64 --self-contained true -o "${BUILD_DIR}"
+echo "[0/3] Building OppodsRfcommHelper..."
+CLANG="${CC:-$(xcrun --find clang)}"
+SDKROOT="${SDKROOT:-$(xcrun --show-sdk-path)}"
+"$CLANG" -fobjc-arc -isysroot "$SDKROOT" \
+  -framework Foundation -framework IOBluetooth -lc++ -O2 \
+  -sectcreate __TEXT __info_plist Transport/macOS/RfcommHelper/Info.plist \
+  -o "${BUILD_DIR}/OppodsRfcommHelper" \
+  Transport/macOS/RfcommHelper/main.mm
+
 # Create .app bundle structure
 echo "[1/3] Creating .app bundle..."
 rm -rf "${APP_DIR}"

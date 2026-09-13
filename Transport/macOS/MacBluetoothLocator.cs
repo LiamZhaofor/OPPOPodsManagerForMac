@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 
 namespace OppoPodsManager;
@@ -46,14 +47,76 @@ public sealed class MacBluetoothLocator : IDeviceLocator
 
     private static List<(ulong addr, string? name)> GetPairedDevices()
     {
-        var devices = new List<(ulong addr, string? name)>();
-
-        // system_profiler SPBluetoothDataType -json 输出配对设备
         var output = RunProcess("system_profiler", "SPBluetoothDataType -json");
-        if (string.IsNullOrEmpty(output)) return devices;
+        if (string.IsNullOrEmpty(output)) return new List<(ulong addr, string?)>();
 
-        // 简单解析 JSON 中的 device 字段
-        // 格式: "device_address" : "xx-xx-xx-xx-xx-xx"
+        var devices = ParseSystemProfilerJson(output);
+        if (devices.Count == 0)
+            devices = ParseByRegex(output); // 兜底：结构化解析失败时按老版本文本格式扫描
+
+        foreach (var d in devices)
+            Log.D("BT", $"MacLocate: found \"{d.name}\" addr=0x{d.addr:X12}");
+        return devices;
+    }
+
+    // system_profiler 的 JSON schema 在 macOS 26/27 变了：SPBluetoothDataType 顶层是数组，
+    // 设备挂在 device_connected / device_not_connected 下且名字是设备对象的 key（没有
+    // device_name 字段），地址改用 ":" 分隔；老版本是普通对象 + device_name 字段、
+    // "-" 分隔地址。这里不做 schema 假设，递归收集一切带 device_address 的对象，
+    // 名字取 device_name/name 字段，取不到时回退到该对象在父级里的 key。
+    private static List<(ulong addr, string? name)> ParseSystemProfilerJson(string output)
+    {
+        var result = new List<(ulong addr, string?)>();
+        var seen = new HashSet<ulong>();
+        try
+        {
+            using var doc = JsonDocument.Parse(output);
+            CollectDevices(doc.RootElement, null, result, seen);
+        }
+        catch (Exception ex)
+        {
+            Log.Ex("BT", "MacLocate json", ex);
+            return new List<(ulong addr, string?)>();
+        }
+        return result;
+    }
+
+    private static void CollectDevices(JsonElement el, string? parentKey,
+        List<(ulong addr, string? name)> result, HashSet<ulong> seen)
+    {
+        switch (el.ValueKind)
+        {
+            case JsonValueKind.Object:
+                string? name = null;
+                ulong addr = 0;
+                foreach (var prop in el.EnumerateObject())
+                {
+                    if (prop.Value.ValueKind != JsonValueKind.String) continue;
+                    if (prop.Name.Equals("device_address", StringComparison.OrdinalIgnoreCase))
+                        addr = ParseBtAddr(prop.Value.GetString() ?? "");
+                    else if (prop.Name.Equals("device_name", StringComparison.OrdinalIgnoreCase)
+                          || prop.Name.Equals("name", StringComparison.OrdinalIgnoreCase))
+                        name = prop.Value.GetString();
+                }
+                if (addr != 0 && seen.Add(addr))
+                    result.Add((addr, name ?? parentKey));
+
+                foreach (var prop in el.EnumerateObject())
+                    if (prop.Value.ValueKind is JsonValueKind.Object or JsonValueKind.Array)
+                        CollectDevices(prop.Value, prop.Name, result, seen);
+                break;
+
+            case JsonValueKind.Array:
+                foreach (var item in el.EnumerateArray())
+                    CollectDevices(item, parentKey, result, seen);
+                break;
+        }
+    }
+
+    // 老版本 macOS 的兜底解析：device_name 字段与 dash 分隔的地址按行顺序配对
+    private static List<(ulong addr, string? name)> ParseByRegex(string output)
+    {
+        var devices = new List<(ulong addr, string? name)>();
         var addrRegex = new Regex(@"""([0-9a-fA-F]{2}(?:-[0-9a-fA-F]{2}){5})""", RegexOptions.Compiled);
         var nameRegex = new Regex(@"""name""\s*:\s*""([^""]+)""", RegexOptions.Compiled);
 
@@ -68,15 +131,10 @@ public sealed class MacBluetoothLocator : IDeviceLocator
             if (addrMatch.Success && currentName != null)
             {
                 var addr = ParseBtAddr(addrMatch.Groups[1].Value);
-                if (addr != 0)
-                {
-                    devices.Add((addr, currentName));
-                    Log.D("BT", $"MacLocate: found \"{currentName}\" addr=0x{addr:X12}");
-                }
+                if (addr != 0) devices.Add((addr, currentName));
                 currentName = null;
             }
         }
-
         return devices;
     }
 

@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>com.oppo.podsmanager.rfcomm-helper</string>
+    <key>CFBundleName</key>
+    <string>OppodsRfcommHelper</string>
+    <key>CFBundleExecutable</key>
+    <string>OppodsRfcommHelper</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>2.0.0</string>
+    <key>LSUIElement</key>
+    <true/>
+    <key>NSBluetoothAlwaysUsageDescription</key>
+    <string>OPPO Pods Manager 需要通过蓝牙连接并控制你的 OPPO 耳机（电量、降噪、音效）。/ OPPO Pods Manager needs Bluetooth to connect and control your OPPO earbuds.</string>
+    <key>NSBluetoothPeripheralUsageDescription</key>
+    <string>OPPO Pods Manager 需要通过蓝牙连接并控制你的 OPPO 耳机（电量、降噪、音效）。/ OPPO Pods Manager needs Bluetooth to connect and control your OPPO earbuds.</string>
+</dict>
+</plist>

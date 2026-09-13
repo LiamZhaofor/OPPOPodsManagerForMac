@@ -70,14 +70,17 @@ public static class TransportFactory
 #if MACOS
 		if (OperatingSystem.IsMacOS())
 		{
-			// macOS: RFCOMM (AF_BLUETOOTH socket) 实现
-			Log.D("FACTORY", $"Create: macOS 平台 -> RFCOMM (目标={(targetAddr == 0 ? "任意" : targetAddr.ToString("X12"))})");
+			// macOS 无 AF_BLUETOOTH socket，经 IOBluetooth 助手进程走 RFCOMM；
+			// 原生 socket 实现作为兜底（仅在极老系统上可能可用）。
+			Log.D("FACTORY", $"Create: macOS 平台 -> IOBluetooth helper 优先, RFCOMM socket 回退 (目标={(targetAddr == 0 ? "任意" : targetAddr.ToString("X12"))})");
 			if (targetAddr == 0)
 			{
 				return new FallbackTransport(
+					() => new MacHelperRfcommTransport(),
 					() => new MacRfcommStreamTransport());
 			}
 			return new FallbackTransport(
+				() => new MacHelperRfcommTransport(new FixedDeviceLocator(targetAddr, name)),
 				() => new MacRfcommStreamTransport(new FixedDeviceLocator(targetAddr, name)));
 		}
 #endif

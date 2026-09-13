@@ -719,7 +719,7 @@ public partial class MainWindow : SukiWindow
     }
 
 #if MACOS
-    private static readonly string MacPlistPath = Path.Combine(
+    private static readonly string MacPlistPath = System.IO.Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
         "Library", "LaunchAgents", "com.t3rhetto.opopodsmanager.plist");
 
@@ -743,15 +743,15 @@ public partial class MainWindow : SukiWindow
             </dict>
             </plist>
             """;
-        var dir = Path.GetDirectoryName(MacPlistPath)!;
-        if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
-        File.WriteAllText(MacPlistPath, plist);
+        var dir = System.IO.Path.GetDirectoryName(MacPlistPath)!;
+        if (!System.IO.Directory.Exists(dir)) System.IO.Directory.CreateDirectory(dir);
+        System.IO.File.WriteAllText(MacPlistPath, plist);
     }
 
     private static void DisableMacAutoStart()
     {
-        if (File.Exists(MacPlistPath))
-            File.Delete(MacPlistPath);
+        if (System.IO.File.Exists(MacPlistPath))
+            System.IO.File.Delete(MacPlistPath);
     }
 #endif
 
