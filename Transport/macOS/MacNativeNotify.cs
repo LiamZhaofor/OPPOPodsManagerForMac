@@ -15,19 +15,28 @@ public static class MacNativeNotify
     {
         try
         {
+            // 通知经 Notifier.app 子应用投递（自己的 bundle id + App 图标）：
+            // 授权与通知来源都是「OPPO Pods Manager」，横幅显示耳机图标。
+            // 兜底：主 helper（osascript 路径，来源显示为脚本编辑器）。
             var helper = Path.Combine(AppContext.BaseDirectory, "OppodsRfcommHelper");
-            if (!File.Exists(helper))
+            var notifier = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory,
+                "..", "PlugIns", "Notifier.app", "Contents", "MacOS", "Notifier"));
+            var target = File.Exists(notifier) ? notifier : helper;
+            if (!File.Exists(target))
             {
-                Log.D("NOTIFY", $"helper missing: {helper}");
+                Log.D("NOTIFY", $"notify binary missing: {target}");
                 return;
             }
+            Log.D("NOTIFY", $"using {target}");
 
             var psi = new ProcessStartInfo
             {
-                FileName = helper,
+                FileName = target,
                 UseShellExecute = false,
                 CreateNoWindow = true,
-                RedirectStandardError = true,
+                // 不重定向任何流：未重定向时访问 p.StandardError 会抛异常；
+                // helper 的诊断走 stderr 直接透传到本进程 stderr，丢弃即可
+                RedirectStandardError = false,
             };
             psi.ArgumentList.Add("notify");
             psi.ArgumentList.Add(title);
@@ -36,9 +45,6 @@ public static class MacNativeNotify
             var p = Process.Start(psi);
             if (p == null) return;
             Log.D("NOTIFY", $"spawned pid={p.Id} title={title}");
-            p.ErrorDataReceived += (_, e) => { if (e.Data != null) Log.D("NOTIFY", e.Data); };
-            p.BeginErrorReadLine();
-            _ = p.StandardError.ReadToEndAsync().ContinueWith(_ => { try { p.Dispose(); } catch { } });
         }
         catch (Exception ex)
         {

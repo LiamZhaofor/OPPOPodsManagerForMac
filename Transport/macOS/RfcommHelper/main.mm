@@ -381,22 +381,68 @@ static NSString *QuoteAppleScript(NSString *s)
 }
 
 // 用法：OppodsRfcommHelper notify <title> <subtitle|-> <body>
-// 经 osascript display notification 投递到系统通知中心（横幅位置/声音/免打扰均由系统管理）。
-// 注：曾尝试 UNUserNotificationCenter——ad-hoc 签名（无 Team ID）的 App 在 macOS 27 上
-// 会被静默拒绝（NotificationsNotAllowed，设置里也不出现条目），故直接走 osascript；
-// 通知在通知中心归属「脚本编辑器」，仅来源显示不同。
+// 优先 UNUserNotificationCenter（通知带 App 自己的图标）；ad-hoc 签名时期曾被静默拒绝，
+// 换稳定签名（Apple Development）后授权可正常弹出。UN 不可用/被拒时兜底
+// osascript display notification（通知中心归属「脚本编辑器」，图标为卷轴）。
 static int RunNotify(NSArray<NSString *> *args)
 {
     if (args.count < 3) { fprintf(stderr, "usage: notify <title> <subtitle|-> <body>\n"); return 1; }
     NSString *title = args[0], *subtitle = args[1], *body = args[2];
 
-    NSMutableString *script = [NSMutableString string];
-    [script appendFormat:@"display notification %@ with title %@", QuoteAppleScript(body.length > 0 ? body : @" "), QuoteAppleScript(title)];
+    NSString *osaScript = [NSMutableString string];
+    [(NSMutableString *)osaScript appendFormat:@"display notification %@ with title %@",
+        QuoteAppleScript(body.length > 0 ? body : @" "), QuoteAppleScript(title)];
     if (![subtitle isEqualToString:@"-"])
-        [script appendFormat:@" subtitle %@", QuoteAppleScript(subtitle)];
+        [(NSMutableString *)osaScript appendFormat:@" subtitle %@", QuoteAppleScript(subtitle)];
+
+    @try {
+        UNUserNotificationCenter *center = [UNUserNotificationCenter currentNotificationCenter];
+        UNMutableNotificationContent *content = [UNMutableNotificationContent new];
+        content.title = title;
+        if (![subtitle isEqualToString:@"-"]) content.subtitle = subtitle;
+        if (body.length > 0) content.body = body;
+        content.sound = [UNNotificationSound defaultSound];
+        UNNotificationRequest *req = [UNNotificationRequest requestWithIdentifier:[[NSUUID UUID] UUIDString]
+                                                                          content:content trigger:nil];
+        __block BOOL done = NO;
+        [center requestAuthorizationWithOptions:(UNAuthorizationOptionAlert | UNAuthorizationOptionSound)
+                              completionHandler:^(BOOL granted, NSError *err) {
+            if (!granted) { Log_(@"notify UN: not granted%@", err ? [NSString stringWithFormat:@" (%@)", err.localizedDescription] : @""); done = YES; return; }
+            [center addNotificationRequest:req withCompletionHandler:^(NSError *e2) {
+                Log_(@"notify UN posted%@", e2 ? [NSString stringWithFormat:@" err=%@", e2.localizedDescription] : @"");
+                done = YES;
+            }];
+        }];
+        // 首次授权等用户点弹窗；最多 30s
+        NSDate *dl = [NSDate dateWithTimeIntervalSinceNow:30.0];
+        while (!done && [dl compare:[NSDate date]] == NSOrderedDescending)
+            [[NSRunLoop mainRunLoop] runMode:NSDefaultRunLoopMode beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.1]];
+        if (done) return 0;
+        Log_(@"notify UN: authorization timeout — fallback to osascript");
+    }
+    @catch (NSException *ex) {
+        Log_(@"notify UN unavailable: %@ — fallback to osascript", ex.reason);
+    }
+
+    // 归属诊断：helper 的 mainBundle 是否解析为 App bundle（决定通知图标归属）
+    Log_(@"mainBundle id=%@ path=%@", [NSBundle mainBundle].bundleIdentifier ?: @"nil",
+         [NSBundle mainBundle].bundlePath ?: @"nil");
+
+    // 优先用进程内 NSAppleScript：display notification 归属当前进程的 mainBundle
+    // （App bundle → 通知显示 App 自己的图标）；失败再兜底 osascript 子进程
+    @try {
+        NSDictionary *aerr = nil;
+        NSAppleScript *as = [[NSAppleScript alloc] initWithSource:osaScript];
+        if ([as executeAndReturnError:&aerr]) {
+            Log_(@"notify via NSAppleScript ok");
+            return 0;
+        }
+        Log_(@"NSAppleScript err: %@", aerr.description ?: @"?");
+    }
+    @catch (NSException *ex) { Log_(@"NSAppleScript exception: %@", ex.reason); }
 
     NSTask *t = [NSTask launchedTaskWithLaunchPath:@"/usr/bin/osascript"
-                                        arguments:@[@"-e", script]];
+                                        arguments:@[@"-e", osaScript]];
     [t waitUntilExit];
     Log_(@"notify via osascript exit=%d", t.terminationStatus);
     return t.terminationStatus == 0 ? 0 : 3;

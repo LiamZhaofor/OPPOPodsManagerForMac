@@ -24,6 +24,38 @@ rm -rf "${APP_DIR}"
 mkdir -p "${APP_DIR}/Contents/MacOS"
 mkdir -p "${APP_DIR}/Contents/Resources"
 cp Assets/AppIcon.icns "${APP_DIR}/Contents/Resources/AppIcon.icns"
+# ---- Notifier.app 子应用：通知以其身份投递（带 App 图标，独立通知授权）----
+NOTIFIER_DIR="${APP_DIR}/Contents/PlugIns/Notifier.app"
+mkdir -p "${NOTIFIER_DIR}/Contents/MacOS" "${NOTIFIER_DIR}/Contents/Resources"
+cp Assets/AppIcon.icns "${NOTIFIER_DIR}/Contents/Resources/AppIcon.icns"
+cp "${BUILD_DIR}/OppodsRfcommHelper" "${NOTIFIER_DIR}/Contents/MacOS/Notifier"
+cat > "${NOTIFIER_DIR}/Contents/Info.plist" << 'NPLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>com.liamzhaofor.oppo-pods-manager.notify</string>
+    <key>CFBundleName</key>
+    <string>OPPO Pods Manager</string>
+    <key>CFBundleDisplayName</key>
+    <string>OPPO Pods Manager</string>
+    <key>CFBundleExecutable</key>
+    <string>Notifier</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>2.0.0</string>
+    <key>LSUIElement</key>
+    <true/>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+</dict>
+</plist>
+NPLIST
+
 
 # Copy ALL files from publish directory
 cp -R "${BUILD_DIR}"/* "${APP_DIR}/Contents/MacOS/"
@@ -40,7 +72,7 @@ cat > "${APP_DIR}/Contents/Info.plist" << 'PLIST'
     <key>CFBundleDisplayName</key>
     <string>OPPO Pods Manager</string>
     <key>CFBundleIdentifier</key>
-    <string>com.oppo.podsmanager</string>
+    <string>com.liamzhaofor.oppo-pods-manager</string>
     <key>CFBundleVersion</key>
     <string>2.0.0</string>
     <key>CFBundleShortVersionString</key>
